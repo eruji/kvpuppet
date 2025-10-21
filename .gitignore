@@ -4,3 +4,8 @@ node_modules/
 # Local configuration and sensitive data
 config.json
 downloads/
+
+# Recordings and error artifacts
+Recording*.json
+error_page.html
+error_screenshot.png

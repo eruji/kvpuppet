@@ -163,7 +163,7 @@ async function main() {
         const baseDownloadPath = path.resolve(__dirname, 'downloads');
         const downloadPath = path.resolve(baseDownloadPath, safeSongTitle);
         if (!fs.existsSync(downloadPath)) {
-            fs.mkdirSync(downloadPath);
+            fs.mkdirSync(downloadPath, { recursive: true });
         }
         
         // Set Puppeteer to download files to our new directory
