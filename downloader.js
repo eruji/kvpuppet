@@ -42,24 +42,9 @@ function saveConfig(data) {
 }
 
 async function navigateToSongPage(page, songUrl) {
-    // --- NEW METHODOLOGY: FOLLOW THE "HUMAN PATH" ---
-    console.log('\nNavigating to "My Files" page...');
-    await page.goto('https://www.karaoke-version.com/my/download.html', { waitUntil: 'networkidle2' });
-
-    // From the song URL, extract a part of the path to find the link
-    // e.g., from ".../huey-lewis-and-the-news/power-of-love.html", we get "power-of-love"
-    const urlPart = songUrl.split('/').pop().replace('.html', '');
-    const songLinkSelector = `a[href*="${urlPart}"]`;
-
-    console.log(`Searching for song link: ${songLinkSelector}`);
-    await page.waitForSelector(songLinkSelector, { timeout: 30000 });
-
-    console.log('Found song link, clicking to navigate to song page...');
-    await Promise.all([
-        page.waitForNavigation({ waitUntil: 'networkidle2' }),
-        page.click(songLinkSelector),
-    ]);
-    console.log('✅ Arrived at song page via "My Files".');
+    console.log('\nNavigating directly to song page...');
+    await page.goto(songUrl, { waitUntil: 'networkidle2' });
+    console.log('✅ Arrived at song page.');
 }
 
 async function handleCookieConsent(page) {
@@ -77,79 +62,9 @@ async function handleCookieConsent(page) {
     }
 }
 
-
-async function main() {
-    console.log('🎤 Karaoke Track Downloader 🎤\n');
-
-    const config = loadConfig();
-
-    // 1. Get User Input
-    const answers = await inquirer.prompt([
-        {
-            type: 'input',
-            name: 'email',
-            message: 'Enter your Karaoke-Version email:',
-            default: config.email,
-        },
-        {
-            type: 'password',
-            name: 'password',
-            message: 'Enter your password:',
-            mask: '*',
-            default: config.password,
-        },
-        {
-            type: 'input',
-            name: 'songUrl',
-            message: 'Enter the URL of the custom backing track:',
-            default: config.songUrl || 'https://www.karaoke-version.com/custombackingtrack/huey-lewis-and-the-news/power-of-love.html',
-        }
-    ]);
-
-    const { email, password, songUrl } = answers;
-
-    if (!email || !password || !songUrl) {
-        console.error('Email, password, and song URL are required. Exiting.');
-        return;
-    }
-
-    // Save the entered details for the next run
-    saveConfig({ email, password, songUrl });
-
-    const browser = await puppeteer.launch({ 
-        headless: false, // Set to 'new' or true for headless, false to watch it work
-        defaultViewport: { width: 1280, height: 1024 }, // Revert to smaller viewport as preferred
-        args: [
-            '--disable-infobars', // Hides the "Chrome is being controlled..." bar
-            // Removed --start-maximized as user prefers smaller window
-        ]
-    });
-    const page = await browser.newPage();
-
-    let success = false; // Flag to track overall success
-
+async function processSong(page, songUrl, enableClickTrack) {
+    let success = false;
     try {
-        // --- LOGIN ---
-        const loginProgressBar = createProgressBar();
-        loginProgressBar.start(100, 0, { step: 'Logging in...' });
-
-        await page.goto('https://www.karaoke-version.com/my/login.html', { waitUntil: 'networkidle2' });
-        loginProgressBar.update(25, { step: 'On login page' });
-
-        // Use selectors from your JSON file
-        await page.type('#frm_login', email);
-        loginProgressBar.update(50, { step: 'Typed email' });
-        
-        await page.type('#frm_password', password);
-        loginProgressBar.update(75, { step: 'Typed password' });
-
-        await Promise.all([
-            page.waitForNavigation({ waitUntil: 'networkidle2' }),
-            page.click('#sbm'),
-        ]);
-        loginProgressBar.update(100, { step: 'Login successful!' });
-        loginProgressBar.stop();
-
         await navigateToSongPage(page, songUrl);
         await handleCookieConsent(page);
 
@@ -183,14 +98,30 @@ async function main() {
         // Corrected selector based on Python script and error_page.html
         const clickTrackSelector = '#precount';
         await page.waitForSelector(clickTrackSelector, { timeout: 5000 });
-        const isClickTrackChecked = await page.$eval(clickTrackSelector, el => el.checked);
-        if (!isClickTrackChecked) {
+        const isChecked = await page.$eval(clickTrackSelector, el => el.checked);
+
+        if (enableClickTrack && !isChecked) {
             await page.click(clickTrackSelector);
-            console.log('✓ Enabled "Click track" intro.');
+            console.log("✓ Enabled 'Intro Click' track.");
+        } else if (!enableClickTrack && isChecked) {
+            await page.click(clickTrackSelector);
+            console.log("✓ Disabled 'Intro Click' track.");
         } else {
-            console.log('✓ "Click track" intro was already enabled.');
+            console.log(`✓ 'Intro Click' track is already set to: ${isChecked ? 'Enabled' : 'Disabled'}.`);
         }
         prepProgressBar.update(66, { step: 'Checked intro click' });
+
+        // --- VERIFY SONG IS PURCHASED ---
+        // Check for the download button. If it's an "Add to Cart" button, the song isn't owned.
+        const downloadButtonSelector = 'a.download';
+        const downloadButton = await page.$(downloadButtonSelector);
+        const buttonText = downloadButton ? await page.evaluate(el => el.textContent.trim(), downloadButton) : '';
+
+        if (!downloadButton || !buttonText.toLowerCase().includes('download')) {
+            console.log('\n⚠️  This song has not been purchased (the "Download" button was not found).');
+            prepProgressBar.stop(); // Stop the progress bar before returning
+            return false; // Gracefully exit this song's processing
+        }
 
         // Find all the tracks in the mixer
         const tracks = await page.$$('#html-mixer .track');
@@ -198,98 +129,215 @@ async function main() {
         prepProgressBar.update(100, { step: 'Ready to download tracks!' });
         prepProgressBar.stop();
 
+        await downloadAllTracks(page, tracks, downloadPath);
 
-        // --- DOWNLOAD EACH TRACK ---
-        // Start at i = 0 to include all tracks, including the click track.
-        for (let i = 0; i < tracks.length; i++) {
-            const downloadProgressBar = createProgressBar();
-            const stepDescription = `Downloading track ${i + 1} of ${tracks.length}`;
-            downloadProgressBar.start(100, 0, { step: stepDescription });
-
-            // Get all tracks again to avoid "stale element" errors
-            const track = (await page.$$('#html-mixer .track'))[i];
-
-            // Get the track name for the file
-            // Corrected selector from .track__name to .track__caption
-            const trackNameElement = await track.$('.track__caption');
-            const trackName = await page.evaluate(el => el.textContent.trim(), trackNameElement);
-            
-            downloadProgressBar.update(25, { step: `${stepDescription}: Soloing "${trackName}"` });
-
-            // Click the 'Solo' button for the current track
-            // Your JSON shows clicks on `button.track__solo`
-            const soloButton = await track.$('button.track__solo');
-            if (soloButton) {
-                await soloButton.click();
-            } else {
-                console.warn(`Could not find a solo button for track "${trackName}". Skipping solo.`);
-            }
-            
-            // Wait a moment for the mix to update
-            await new Promise(resolve => setTimeout(resolve, 1000));
-            downloadProgressBar.update(50, { step: `${stepDescription}: Clicking main download button` });
-
-            // Click the main download button (This button is on the main page, not in the iframe)
-            // The ID is song-specific, so we use a more generic class selector.
-            // Corrected selector based on Python script and error_page.html
-            const downloadButtonSelector = 'a.download';
-            await page.waitForSelector(downloadButtonSelector, { timeout: 10000 });
-            await page.click(downloadButtonSelector);
-            downloadProgressBar.update(60, { step: `${stepDescription}: Waiting for download to start` });
-            
-            // --- Wait for download to complete (robust method) ---
-            const filesBefore = fs.readdirSync(downloadPath).filter(f => f.endsWith('.mp3')).length;
-            const startTime = Date.now();
-            let newFileFound = false;
-            while (Date.now() - startTime < 45000) { // 45s timeout for download
-                const filesAfter = fs.readdirSync(downloadPath).filter(f => f.endsWith('.mp3')).length;
-                if (filesAfter > filesBefore) {
-                    newFileFound = true;
-                    break;
-                }
-                await new Promise(resolve => setTimeout(resolve, 500)); // Check every 0.5s
-            }
-            if (!newFileFound) {
-                console.warn(`\nWarning: Download for "${trackName}" did not complete within the time limit.`);
-            }
-            downloadProgressBar.update(80, { step: `${stepDescription}: Download finished` });
-
-            // --- Close the download confirmation modal ---
-            try {
-                const closeModalSelector = 'div.modal__overlay div.modal button';
-                await page.waitForSelector(closeModalSelector, { visible: true, timeout: 5000 });
-                await page.click(closeModalSelector);
-            } catch (e) {
-                console.log(`(Info) Download modal not found for track "${trackName}", continuing...`);
-            }
-
-            // Un-solo the track to prepare for the next one
-            if (soloButton) {
-                await soloButton.click();
-            }
-            
-            downloadProgressBar.update(100, { step: `${stepDescription}: "${trackName}" finished!` });
-            downloadProgressBar.stop();
-        }
-        success = true; // Set success flag if all tracks downloaded
+        success = true;
     } catch (error) {
-        console.error('\nAn error occurred:', error);
+        console.error(`\nAn error occurred while processing ${songUrl}:`, error);
         // Take a screenshot on error for debugging
         const errorScreenshotPath = path.resolve(__dirname, 'error_screenshot.png');
         await page.screenshot({ path: errorScreenshotPath, fullPage: true });
         console.log(`📸 Screenshot saved to ${errorScreenshotPath}`);
-        // Save the page's HTML for deep debugging
-        const pageHtml = await page.content();
-        fs.writeFileSync(path.resolve(__dirname, 'error_page.html'), pageHtml);
-        console.log(`📄 Page HTML saved to error_page.html`);
-    } finally {
-        await browser.close(); // Always close the browser
-        if (success) {
-            console.log('\n🎉 Success! All tracks have been downloaded.');
-            console.log('Check the project folder for your new directory of tracks.');
-        } else {
-            console.log('\n❌ Operation failed or completed with errors.');
+    }
+    return success;
+}
+
+async function main() {
+    console.log('🎤 Karaoke Track Downloader 🎤\n');
+
+    const config = loadConfig();
+
+    const answers = await inquirer.prompt([
+        {
+            type: 'input',
+            name: 'email',
+            message: 'Enter your Karaoke-Version email:',
+            default: config.email,
+        },
+        {
+            type: 'password',
+            name: 'password',
+            message: 'Enter your password:',
+            mask: '*',
+            default: config.password,
+        },
+    ]);
+
+    const { email, password } = answers;
+
+    if (!email || !password) {
+        console.error('Email and password are required. Exiting.');
+        return;
+    }
+
+    const browser = await puppeteer.launch({ 
+        headless: false, // Set to 'new' or true for headless, false to watch it work
+        defaultViewport: { width: 1280, height: 1024 }, // Revert to smaller viewport as preferred
+        args: [
+            '--disable-infobars', // Hides the "Chrome is being controlled..." bar
+            // Removed --start-maximized as user prefers smaller window
+        ]
+    });
+    const page = await browser.newPage();
+
+    try {
+        // --- LOGIN ---
+        const loginProgressBar = createProgressBar();
+        loginProgressBar.start(100, 0, { step: 'Logging in...' });
+
+        await page.goto('https://www.karaoke-version.com/my/login.html', { waitUntil: 'networkidle2' });
+        loginProgressBar.update(25, { step: 'On login page' });
+
+        // Use selectors from your JSON file
+        await page.type('#frm_login', email);
+        loginProgressBar.update(50, { step: 'Typed email' });
+        
+        await page.type('#frm_password', password);
+        loginProgressBar.update(75, { step: 'Typed password' });
+
+        await Promise.all([
+            page.waitForNavigation({ waitUntil: 'networkidle2' }),
+            page.click('#sbm'),
+        ]);
+        loginProgressBar.update(100, { step: 'Login successful!' });
+        loginProgressBar.stop();
+
+        // --- Main Application Loop ---
+        while (true) {
+            console.log('\n' + '-'.repeat(50));
+
+            const choices = [
+                { name: 'Enter a new song URL', value: 'new' },
+            ];
+            if (config.songUrl) {
+                choices.push({ name: `Download last song again (${config.songUrl})`, value: 'last' });
+            }
+            choices.push({ name: 'Exit', value: 'exit' });
+
+            const { action } = await inquirer.prompt({
+                type: 'list',
+                name: 'action',
+                message: 'What would you like to do?',
+                choices,
+            });
+
+            if (action === 'exit') {
+                console.log('Exiting...');
+                break;
+            }
+
+            let songUrl = config.songUrl;
+            if (action === 'new') {
+                const { newUrl } = await inquirer.prompt({
+                    type: 'input',
+                    name: 'newUrl',
+                    message: 'Enter the new song URL:',
+                });
+                songUrl = newUrl;
+            }
+
+            if (!songUrl) {
+                console.log('No URL provided. Please try again.');
+                continue; // Go back to the main menu
+            }
+
+            const { enableClickTrack } = await inquirer.prompt([
+                {
+                    type: 'confirm',
+                    name: 'enableClickTrack',
+                    message: "Enable 'Intro Click' track?",
+                    default: config.enableClickTrack !== false,
+                },
+            ]);
+
+            // Save config for the next run
+            saveConfig({ email, password, songUrl, enableClickTrack });
+
+            const success = await processSong(page, songUrl, enableClickTrack);
+            if (success) {
+                console.log(`\n✅ Successfully processed: ${songUrl}`);
+            } else {
+                console.log(`\n❌ Finished processing ${songUrl} with issues (see logs above). Ready for next song.`);
+            }
         }
+    } catch (error) {
+        console.error('\nAn unrecoverable error occurred:', error);
+    } finally {
+        await browser.close();
+        console.log('\n👋 Goodbye!');
+    }
+}
+
+async function downloadAllTracks(page, tracks, downloadPath) {
+    for (let i = 0; i < tracks.length; i++) {
+        const downloadProgressBar = createProgressBar();
+        const stepDescription = `Downloading track ${i + 1} of ${tracks.length}`;
+        downloadProgressBar.start(100, 0, { step: stepDescription });
+
+        // Get all tracks again to avoid "stale element" errors
+        const track = (await page.$$('#html-mixer .track'))[i];
+
+        // Get the track name for the file
+        // Corrected selector from .track__name to .track__caption
+        const trackNameElement = await track.$('.track__caption');
+        const trackName = await page.evaluate(el => el.textContent.trim(), trackNameElement);
+        
+        downloadProgressBar.update(25, { step: `${stepDescription}: Soloing "${trackName}"` });
+
+        // Click the 'Solo' button for the current track
+        // Your JSON shows clicks on `button.track__solo`
+        const soloButton = await track.$('button.track__solo');
+        if (soloButton) {
+            await soloButton.click();
+        } else {
+            console.warn(`Could not find a solo button for track "${trackName}". Skipping solo.`);
+        }
+        
+        // Wait a moment for the mix to update
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        downloadProgressBar.update(50, { step: `${stepDescription}: Clicking main download button` });
+
+        // Click the main download button (This button is on the main page, not in the iframe)
+        // The ID is song-specific, so we use a more generic class selector.
+        // Corrected selector based on Python script and error_page.html
+        const downloadButtonSelector = 'a.download';
+        await page.waitForSelector(downloadButtonSelector, { timeout: 10000 });
+        await page.click(downloadButtonSelector);
+        downloadProgressBar.update(60, { step: `${stepDescription}: Waiting for download to start` });
+        
+        // --- Wait for download to complete (robust method) ---
+        const filesBefore = fs.readdirSync(downloadPath).filter(f => f.endsWith('.mp3')).length;
+        const startTime = Date.now();
+        let newFileFound = false;
+        while (Date.now() - startTime < 45000) { // 45s timeout for download
+            const filesAfter = fs.readdirSync(downloadPath).filter(f => f.endsWith('.mp3')).length;
+            if (filesAfter > filesBefore) {
+                newFileFound = true;
+                break;
+            }
+            await new Promise(resolve => setTimeout(resolve, 500)); // Check every 0.5s
+        }
+        if (!newFileFound) {
+            console.warn(`\nWarning: Download for "${trackName}" did not complete within the time limit.`);
+        }
+        downloadProgressBar.update(80, { step: `${stepDescription}: Download finished` });
+
+        // --- Close the download confirmation modal ---
+        try {
+            const closeModalSelector = 'div.modal__overlay div.modal button';
+            await page.waitForSelector(closeModalSelector, { visible: true, timeout: 5000 });
+            await page.click(closeModalSelector);
+        } catch (e) {
+            console.log(`(Info) Download modal not found for track "${trackName}", continuing...`);
+        }
+
+        // Un-solo the track to prepare for the next one
+        if (soloButton) {
+            await soloButton.click();
+        }
+        
+        downloadProgressBar.update(100, { step: `${stepDescription}: "${trackName}" finished!` });
+        downloadProgressBar.stop();
     }
 }
 
