@@ -8,4 +8,4 @@ downloads/
 # Recordings and error artifacts
 Recording*.json
 error_page.html
-error_screenshot.png
+error*.png
