@@ -1,0 +1,6 @@
+# Node.js
+node_modules/
+
+# Local configuration and sensitive data
+config.json
+downloads/
