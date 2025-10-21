@@ -9,7 +9,7 @@ const cliProgress = require('cli-progress');
 
 // A helper function to create a styled progress bar
 const createProgressBar = () => new cliProgress.SingleBar({
-    format: ' {bar} | {percentage}% | {step}',
+    format: '{step} | {bar} | {value}/{total} Tracks',
 }, cliProgress.Presets.shades_classic);
 
 // Apply the stealth plugin
@@ -64,14 +64,14 @@ async function handleCookieConsent(page) {
 
 async function processSong(page, songUrl, enableClickTrack) {
     let success = false;
+    let cleanSongTitle = songUrl; // Default to URL if title can't be fetched
     try {
         await navigateToSongPage(page, songUrl);
         await handleCookieConsent(page);
 
-        // --- PREPARE FOR DOWNLOAD ---
-        const prepProgressBar = createProgressBar();
-        prepProgressBar.start(100, 0, { step: 'Preparing for download...' });
-
+        const songPageTitle = await page.title();
+        cleanSongTitle = songPageTitle.split('|')[0].trim();
+        
         // Get song title to create a directory
         const songTitle = await page.title();
         const safeSongTitle = songTitle.split('|')[0].trim().replace(/[^a-z0-9\s-]/gi, '_');
@@ -87,7 +87,6 @@ async function processSong(page, songUrl, enableClickTrack) {
             behavior: 'allow',
             downloadPath: downloadPath,
         });
-        prepProgressBar.update(33, { step: `Created directory: ${safeSongTitle}` });
 
         // The mixer is in the main page, not an iframe. Wait for it to appear.
         console.log('\nWaiting for the dynamic mixer to load...');
@@ -109,7 +108,6 @@ async function processSong(page, songUrl, enableClickTrack) {
         } else {
             console.log(`✓ 'Intro Click' track is already set to: ${isChecked ? 'Enabled' : 'Disabled'}.`);
         }
-        prepProgressBar.update(66, { step: 'Checked intro click' });
 
         // --- VERIFY SONG IS PURCHASED ---
         // Check for the download button. If it's an "Add to Cart" button, the song isn't owned.
@@ -119,27 +117,25 @@ async function processSong(page, songUrl, enableClickTrack) {
 
         if (!downloadButton || !buttonText.toLowerCase().includes('download')) {
             console.log('\n⚠️  This song has not been purchased (the "Download" button was not found).');
-            prepProgressBar.stop(); // Stop the progress bar before returning
             return false; // Gracefully exit this song's processing
         }
 
         // Find all the tracks in the mixer
         const tracks = await page.$$('#html-mixer .track');
-        console.log(`\nFound ${tracks.length} tracks to download.`);
-        prepProgressBar.update(100, { step: 'Ready to download tracks!' });
-        prepProgressBar.stop();
+        console.log(`Found ${tracks.length} tracks to download.`);
 
-        await downloadAllTracks(page, tracks, downloadPath);
+        const downloadProgressBar = createProgressBar();
+        downloadProgressBar.start(tracks.length, 0, { step: `Downloading "${cleanSongTitle}"` });
+
+        await downloadAllTracks(page, tracks, downloadPath, downloadProgressBar);
+
+        downloadProgressBar.stop();
 
         success = true;
     } catch (error) {
         console.error(`\nAn error occurred while processing ${songUrl}:`, error);
-        // Take a screenshot on error for debugging
-        const errorScreenshotPath = path.resolve(__dirname, 'error_screenshot.png');
-        await page.screenshot({ path: errorScreenshotPath, fullPage: true });
-        console.log(`📸 Screenshot saved to ${errorScreenshotPath}`);
     }
-    return success;
+    return { success, songTitle: cleanSongTitle };
 }
 
 async function main() {
@@ -171,7 +167,7 @@ async function main() {
     }
 
     const browser = await puppeteer.launch({ 
-        headless: false, // Set to 'new' or true for headless, false to watch it work
+        headless: 'new', // Set to 'new' for faster, non-visual operation
         defaultViewport: { width: 1280, height: 1024 }, // Revert to smaller viewport as preferred
         args: [
             '--disable-infobars', // Hides the "Chrome is being controlled..." bar
@@ -245,7 +241,7 @@ async function main() {
                 {
                     type: 'confirm',
                     name: 'enableClickTrack',
-                    message: "Enable 'Intro Click' track?",
+                    message: "Enable 'Intro Click'?",
                     default: config.enableClickTrack !== false,
                 },
             ]);
@@ -253,27 +249,23 @@ async function main() {
             // Save config for the next run
             saveConfig({ email, password, songUrl, enableClickTrack });
 
-            const success = await processSong(page, songUrl, enableClickTrack);
+            const { success, songTitle } = await processSong(page, songUrl, enableClickTrack);
             if (success) {
-                console.log(`\n✅ Successfully processed: ${songUrl}`);
+                console.log(`\n✅ Successfully downloaded all tracks for: "${songTitle}"`);
             } else {
-                console.log(`\n❌ Finished processing ${songUrl} with issues (see logs above). Ready for next song.`);
+                console.log(`\n❌ Finished processing "${songTitle}" with issues (see logs above). Ready for next song.`);
             }
         }
     } catch (error) {
         console.error('\nAn unrecoverable error occurred:', error);
     } finally {
         await browser.close();
-        console.log('\n👋 Goodbye!');
+        console.log('\n👋 Session ended. Goodbye!');
     }
 }
 
-async function downloadAllTracks(page, tracks, downloadPath) {
+async function downloadAllTracks(page, tracks, downloadPath, progressBar) {
     for (let i = 0; i < tracks.length; i++) {
-        const downloadProgressBar = createProgressBar();
-        const stepDescription = `Downloading track ${i + 1} of ${tracks.length}`;
-        downloadProgressBar.start(100, 0, { step: stepDescription });
-
         // Get all tracks again to avoid "stale element" errors
         const track = (await page.$$('#html-mixer .track'))[i];
 
@@ -281,8 +273,6 @@ async function downloadAllTracks(page, tracks, downloadPath) {
         // Corrected selector from .track__name to .track__caption
         const trackNameElement = await track.$('.track__caption');
         const trackName = await page.evaluate(el => el.textContent.trim(), trackNameElement);
-        
-        downloadProgressBar.update(25, { step: `${stepDescription}: Soloing "${trackName}"` });
 
         // Click the 'Solo' button for the current track
         // Your JSON shows clicks on `button.track__solo`
@@ -295,7 +285,6 @@ async function downloadAllTracks(page, tracks, downloadPath) {
         
         // Wait a moment for the mix to update
         await new Promise(resolve => setTimeout(resolve, 1000));
-        downloadProgressBar.update(50, { step: `${stepDescription}: Clicking main download button` });
 
         // Click the main download button (This button is on the main page, not in the iframe)
         // The ID is song-specific, so we use a more generic class selector.
@@ -303,7 +292,6 @@ async function downloadAllTracks(page, tracks, downloadPath) {
         const downloadButtonSelector = 'a.download';
         await page.waitForSelector(downloadButtonSelector, { timeout: 10000 });
         await page.click(downloadButtonSelector);
-        downloadProgressBar.update(60, { step: `${stepDescription}: Waiting for download to start` });
         
         // --- Wait for download to complete (robust method) ---
         const filesBefore = fs.readdirSync(downloadPath).filter(f => f.endsWith('.mp3')).length;
@@ -320,7 +308,6 @@ async function downloadAllTracks(page, tracks, downloadPath) {
         if (!newFileFound) {
             console.warn(`\nWarning: Download for "${trackName}" did not complete within the time limit.`);
         }
-        downloadProgressBar.update(80, { step: `${stepDescription}: Download finished` });
 
         // --- Close the download confirmation modal ---
         try {
@@ -336,8 +323,7 @@ async function downloadAllTracks(page, tracks, downloadPath) {
             await soloButton.click();
         }
         
-        downloadProgressBar.update(100, { step: `${stepDescription}: "${trackName}" finished!` });
-        downloadProgressBar.stop();
+        progressBar.increment();
     }
 }
 
