@@ -40,10 +40,10 @@ The first time you run the application, it will ask for your Karaoke-Version ema
 
 ### Using the Application
 
-After logging in, you will be presented with a menu:
-
--   **Enter a new song URL:** Choose this to download a new song. You will be prompted to paste the URL of the song you want to download.
--   **Download last song again:** A convenient shortcut to re-download the last song you entered.
+After logging in, you will be presented with a menu of your purchased songs:
+-   **Select a song from the list:** Choose any of your purchased songs to download its tracks.
+-   **Refresh song list:** If you've purchased new songs since starting the application, you can refresh the list.
+-   **Enter a song URL manually:** If you prefer, you can still paste a direct URL to a song page.
 -   **Exit:** Safely closes the application.
 
 Downloaded songs will be saved in a `downloads` folder inside your project directory, with each song getting its own subfolder.
