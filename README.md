@@ -51,4 +51,3 @@ Downloaded songs will be saved in a `downloads` folder inside your project direc
 ## Important Notes
 
 - The `config.json` file contains your login credentials. **Do not share this file with anyone.**
-- The application runs "headless" by default, meaning you won't see a browser window. It performs all actions in the background, and you will see the progress in your terminal.

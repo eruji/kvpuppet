@@ -16,8 +16,6 @@ const createProgressBar = () => new cliProgress.SingleBar({
 puppeteer.use(StealthPlugin());
 
 // --- Configuration Management ---
-// This will store your last-used credentials and URL locally.
-// IMPORTANT: Do NOT share config.json as it contains your password.
 const configPath = path.resolve(__dirname, 'config.json');
 
 function loadConfig() {
@@ -423,6 +421,9 @@ async function downloadAllTracks(page, tracks, downloadPath, progressBar) {
             const trackNumber = String(i + 1).padStart(2, '0');
             const finalFileName = `${trackNumber} - ${safeTrackName}.mp3`;
             const finalFilePath = path.join(downloadPath, finalFileName);
+
+            // Update the progress bar to show the final filename being created
+            progressBar.update({ step: `Creating "${finalFileName}"` });
 
             fs.renameSync(newFilePath, finalFilePath);
         } else {
