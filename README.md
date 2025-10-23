@@ -48,6 +48,14 @@ After logging in, you will be presented with a menu of your purchased songs:
 
 Downloaded songs will be saved in a `downloads` folder inside your project directory, with each song getting its own subfolder.
 
+### Running with a Visible Browser
+
+By default, the application runs in "headless" mode, meaning no browser window will appear. This is ideal for normal operation. If you need to see the browser for debugging purposes, you can start it with the `--visible` flag:
+
+```bash
+npm start -- --visible
+```
+
 ## Important Notes
 
 - The `config.json` file contains your login credentials. **Do not share this file with anyone.**

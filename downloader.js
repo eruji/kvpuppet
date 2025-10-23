@@ -191,25 +191,30 @@ async function fetchPurchasedSongs(page) {
         if (nextButton) {
             pageNumber++;
             console.log(`Found "next" page link. Navigating to page ${pageNumber}...`);
-            try {
-                // Click the link and wait for the page to reload
-                await nextButton.click();
-                await page.waitForNavigation({ waitUntil: 'networkidle2' });
 
-                // After navigation, explicitly wait for the content to change.
-                // We'll wait until the first song's URL is different from the previous page's first song.
+            try {
+                // Scroll the 'next' button into view to ensure it's clickable, a common headless mode fix.
+                await page.evaluate(el => el.scrollIntoView({ block: 'center' }), nextButton);
+                await new Promise(resolve => setTimeout(resolve, 250)); // Brief pause after scroll
+
+                // Click the button to trigger the page change.
+                await nextButton.click();
+
+                // Wait for the content to actually change by checking if the first song's URL is different.
+                // This is more reliable than waitForNavigation for pages that load content with JavaScript.
                 await page.waitForFunction(
                     (selector, previousHref) => {
-                        const firstSong = document.querySelector(selector);
-                        const firstSongHref = firstSong ? firstSong.querySelector('a')?.href : null;
-                        return firstSongHref !== previousHref;
+                        const currentFirstSong = document.querySelector(selector);
+                        const currentFirstSongHref = currentFirstSong ? currentFirstSong.querySelector('a')?.href : null;
+                        // Return true when the new content has loaded and the URL is different.
+                        return currentFirstSongHref !== previousHref;
                     },
-                    { timeout: 15000 }, // Wait up to 15 seconds for the content to update
+                    { timeout: 20000 }, // Increased timeout for headless mode
                     songListSelector,
                     firstSongOnPageHref
                 );
             } catch (e) {
-                console.log(`Could not click the 'next' button, assuming it's the last page. Error: ${e.message}`);
+                console.log(`Pagination failed while navigating to page ${pageNumber}. Assuming it's the last page. Error: ${e.message}`);
                 break;
             }
         } else {
@@ -228,7 +233,7 @@ async function fetchPurchasedSongs(page) {
     return uniqueSongs;
 }
 
-async function main() {
+async function main(args) {
     console.log('🎤 Karaoke Track Downloader 🎤\n');
 
     const config = loadConfig();
@@ -256,13 +261,12 @@ async function main() {
         return;
     }
 
-    const browser = await puppeteer.launch({ 
-        headless: false, // Set to false to see the browser window
-        defaultViewport: { width: 1280, height: 1024 }, // Revert to smaller viewport as preferred
-        args: [
-            '--disable-infobars', // Hides the "Chrome is being controlled..." bar
-            // Removed --start-maximized as user prefers smaller window
-        ]
+    const browser = await puppeteer.launch({
+        // Run headless by default. If '--visible' flag is passed, show the browser.
+        headless: !args.includes('--visible') ? 'new' : false,
+        // Ensure consistent viewport size in both headless and headful modes
+        defaultViewport: { width: 1280, height: 1024 },
+        args: ['--disable-infobars'],
     });
     const page = await browser.newPage();
 
@@ -367,89 +371,130 @@ async function main() {
 }
 
 async function downloadAllTracks(page, tracks, downloadPath, progressBar) {
+    // Centralize the download timeout for easier configuration.
+    const DOWNLOAD_TIMEOUT_MS = 180000; // 3 minutes
+
     for (let i = 0; i < tracks.length; i++) {
-        // Re-fetch the track element inside the loop to prevent "stale element" errors
-        const track = (await page.$$('#html-mixer .track'))[i];
+        let downloadSuccessful = false;
+        let userSkipped = false;
 
-        // Get the track name for the file
-        const trackNameElement = await track.$('.track__caption');
-        const trackName = await page.evaluate(el => el.textContent.trim(), trackNameElement);
+        while (!downloadSuccessful && !userSkipped) {
+            // Re-fetch the track element inside the loop to prevent "stale element" errors
+            const track = (await page.$$('#html-mixer .track'))[i];
 
-        // Click the 'Solo' button for the current track to isolate it for download.
-        const soloButton = await track.$('button.track__solo');
-        if (soloButton) {
-            // Scroll the button into view and wait a moment to ensure it's clickable
-            await page.evaluate(el => {
-                el.scrollIntoView({ block: 'center', inline: 'center' });
-            }, soloButton);
-            await new Promise(resolve => setTimeout(resolve, 250)); // Brief pause after scroll
-            await soloButton.click(); // Enable solo
-        } else {
-            console.warn(`Could not find a solo button for track "${trackName}".`);
-        }
-        // Wait a moment for the mix to update
-        await new Promise(resolve => setTimeout(resolve, 1000));
+            // Get the track name for the file
+            const trackNameElement = await track.$('.track__caption');
+            const trackName = await page.evaluate(el => el.textContent.trim(), trackNameElement);
 
-        // Click the main download button (This button is on the main page, not in the iframe)
-        // The ID is song-specific, so we use a more generic class selector.
-        // Corrected selector based on Python script and error_page.html
-        const downloadButtonSelector = 'a.download';
-        await page.waitForSelector(downloadButtonSelector, { timeout: 10000 });
-        await page.click(downloadButtonSelector);
-        
-        // --- Wait for download to complete and rename the file ---
-        const filesBefore = new Set(fs.readdirSync(downloadPath));
-        const startTime = Date.now();
-        let newFilePath = null;
-
-        while (Date.now() - startTime < 45000) { // 45s timeout for download
-            const currentFiles = fs.readdirSync(downloadPath);
-            const newFile = currentFiles.find(file => !filesBefore.has(file) && !file.endsWith('.crdownload'));
-            if (newFile) {
-                newFilePath = path.join(downloadPath, newFile);
-                // Wait a bit more to ensure the file is fully written
-                await new Promise(resolve => setTimeout(resolve, 1000)); 
-                break; 
-            }
-            await new Promise(resolve => setTimeout(resolve, 500)); // Check every 0.5s
-        }
-
-        if (newFilePath) {
-            // Sanitize track name for the filesystem
+            // Determine the final filename to check if it already exists before proceeding
             const safeTrackName = trackName.replace(/[^a-z0-9\s-]/gi, '_').replace(/\s+/g, ' ');
-            // Format track number with leading zero
             const trackNumber = String(i + 1).padStart(2, '0');
             const finalFileName = `${trackNumber} - ${safeTrackName}.mp3`;
             const finalFilePath = path.join(downloadPath, finalFileName);
 
-            // Update the progress bar to show the final filename being created
-            progressBar.update({ step: `Creating "${finalFileName}"` });
+            // If the file already exists, skip the download process for this track
+            if (fs.existsSync(finalFilePath)) {
+                progressBar.update({ step: `Skipping "${finalFileName}" (already exists)` });
+                downloadSuccessful = true; // Mark as successful to exit the retry loop
+                continue; // Move to the next track in the outer loop
+            }
 
-            fs.renameSync(newFilePath, finalFilePath);
-        } else {
-            console.warn(`\nWarning: Download for "${trackName}" did not complete within the time limit.`);
-        }
+            // Click the 'Solo' button for the current track to isolate it for download.
+            const soloButton = await track.$('button.track__solo');
+            if (soloButton) {
+                // Scroll the button into view and wait a moment to ensure it's clickable
+                await page.evaluate(el => {
+                    el.scrollIntoView({ block: 'center', inline: 'center' });
+                }, soloButton);
+                await new Promise(resolve => setTimeout(resolve, 250)); // Brief pause after scroll
+                await soloButton.click(); // Enable solo
+            } else {
+                console.warn(`Could not find a solo button for track "${trackName}".`);
+            }
+            // Wait a moment for the mix to update
+            await new Promise(resolve => setTimeout(resolve, 1000));
 
-        // --- Close the download confirmation modal ---
-        try {
-            const closeModalSelector = 'div.modal__overlay div.modal button';
-            await page.waitForSelector(closeModalSelector, { visible: true, timeout: 5000 });
-            await page.click(closeModalSelector);
-        } catch (e) {
-            console.log(`(Info) Download modal not found for track "${trackName}", continuing...`);
-        }
+            // Click the main download button
+            const downloadButtonSelector = 'a.download';
+            await page.waitForSelector(downloadButtonSelector, { timeout: 10000 });
+            await page.click(downloadButtonSelector);
+            
+            // --- Wait for download to complete and rename the file ---
+            const filesBefore = new Set(fs.readdirSync(downloadPath));
+            const startTime = Date.now();
+            let newFilePath = null;
+            
+            // Poll for the new file to appear in the download directory.
+            while (Date.now() - startTime < DOWNLOAD_TIMEOUT_MS) {
+                const currentFiles = fs.readdirSync(downloadPath);
+                const newFile = currentFiles.find(file => !filesBefore.has(file) && !file.endsWith('.crdownload'));
+                if (newFile) {
+                    newFilePath = path.join(downloadPath, newFile);
+                    await new Promise(resolve => setTimeout(resolve, 1000)); // Wait a moment to ensure the file is fully written
+                    break;
+                }
+                await new Promise(resolve => setTimeout(resolve, 500)); // Check every half-second
+            }
 
-        // Un-solo the track to prepare for the next one.
-        if (soloButton) {
-            // The same robust click method to un-solo
-            await page.evaluate(el => {
-                el.scrollIntoView({ block: 'center', inline: 'center' });
-            }, soloButton);
-            await soloButton.click(); // Disable solo
+            if (newFilePath) {
+                // Update the progress bar to show the final filename being created
+                progressBar.update({ step: `Creating "${finalFileName}"` });
+                fs.renameSync(newFilePath, finalFilePath);
+                downloadSuccessful = true;
+            } else {
+                // --- DOWNLOAD FAILED ---
+                progressBar.stop(); // Pause the progress bar for the prompt
+                console.warn(`\n\n⚠️  Download for "${trackName}" timed out.`);
+
+                // Clean up any partial .crdownload files
+                const currentFiles = fs.readdirSync(downloadPath);
+                const tempFile = currentFiles.find(file => !filesBefore.has(file) && file.endsWith('.crdownload'));
+                if (tempFile) {
+                    fs.unlinkSync(path.join(downloadPath, tempFile));
+                    console.log('✓ Cleaned up temporary file.');
+                }
+
+                const { choice } = await inquirer.prompt([
+                    {
+                        type: 'list',
+                        name: 'choice',
+                        message: `What would you like to do for "${trackName}"?`,
+                        choices: ['Retry', 'Skip'],
+                    },
+                ]);
+
+                if (choice === 'Skip') {
+                    userSkipped = true;
+                    console.log(`Skipping track "${trackName}".`);
+                } else {
+                    console.log(`Retrying download for "${trackName}"...`);
+                }
+                progressBar.start(tracks.length, i, { step: `Retrying "${trackName}"` }); // Resume progress bar
+            }
+
+            // --- Close the download confirmation modal ---
+            try {
+                const closeModalSelector = 'div.modal__overlay div.modal button';
+                await page.waitForSelector(closeModalSelector, { visible: true, timeout: 5000 });
+                await page.click(closeModalSelector);
+            } catch (e) {
+                // This is not critical, so we just log it informatively.
+                // console.log(`(Info) Download modal not found for track "${trackName}", continuing...`);
+            }
+
+            // Un-solo the track to prepare for the next one.
+            if (soloButton) {
+                // The same robust click method to un-solo
+                await page.evaluate(el => {
+                    el.scrollIntoView({ block: 'center', inline: 'center' });
+                }, soloButton);
+                await soloButton.click(); // Disable solo
+            }
         }
         
         progressBar.increment();
     }
 }
 
-main();
+// Pass command line arguments (like --visible) to the main function
+main(process.argv.slice(2));
